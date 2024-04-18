@@ -1,2 +1,7 @@
-/data
-/res
+data/*.dbf
+data/*.shp
+data/*.tif
+data/*.tif
+data/*.prj
+res/*.png
+data/*.shx
