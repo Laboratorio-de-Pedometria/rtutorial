@@ -19,6 +19,9 @@ if (!require(sf)) {
 if (!require(gdalUtilities)) {
   install.packages("gdalUtilities")
 }
+if (!require(terra)) {
+  install.packages("terra")
+}
 
 # We will be downloading large files, so we need to increase the timeout
 options(timeout = 3000)  # Increase timeout to 300 seconds
@@ -40,9 +43,13 @@ options(timeout = 3000)  # Increase timeout to 300 seconds
 # directory. If not, we download it and save it in the data directory.
 output_file <- "data/municipalities.gpkg"
 if (!file.exists(output_file)) {
+  t0 <- Sys.time()
   muni <- geobr::read_municipality(code_muni = "all", year = 2020, simplified = FALSE)
   muni <- sf::st_transform(muni, crs = 4326)
   sf::st_write(muni, output_file)
+  Sys.time() - t0
+} else {
+  cat("The municipalities data is already available.\n")
 }
 
 # Soil Map of Brazil ##############################################################################
@@ -53,7 +60,7 @@ if (!file.exists(output_file)) {
 # We will download the data from the IBGE GeoServer. The data is available in the GeoJSON format.
 # https://geoservicos.ibge.gov.br/geoserver/ows
 
-# This is a large dataset (~1.5 GB). So we first check if it is already available in the data
+# This is a large dataset (~1.2 GB). So we first check if it is already available in the data
 # directory. If not, we download it and save it in the data directory.
 input_url <- paste0(
   "https://geoservicos.ibge.gov.br/geoserver/ows?service=WFS&version=1.0.0",
@@ -61,12 +68,16 @@ input_url <- paste0(
 )
 output_file <- "data/pedology.json"
 if (!file.exists(output_file)) {
+  t0 <- Sys.time()
   download.file(url = input_url, destfile = output_file)
+  pedology <- sf::st_read("data/pedology.json")
+  pedology <- sf::st_transform(pedology, crs = 4326)
+  pedology <- sf::st_make_valid(pedology)
+  sf::st_write(pedology, "data/pedology.gpkg")
+  Sys.time() - t0
+} else {
+  cat("The pedology data is already available.\n")
 }
-
-# get file info using gdal/ogr
-system("ogrinfo data/pedology.json")
-
 
 # Land Use and Land Cover Map of Brazil ##########################################################
 
@@ -84,161 +95,94 @@ input_url <- paste0(
 )
 output_file <- "data/mapbiomas2023.tif"
 if (!file.exists(output_file)) {
+  t0 <- Sys.time()
   download.file(url = input_url, destfile = output_file)
+  Sys.time() - t0
+} else {
+  cat("The MapBiomas data is already available.\n")
 }
 
-# Data processing ##################################################################################
+# Data analysis ####################################################################################
+# We need to identify, for each municipality, the dominant soil class occurring in areas with
+# agriculture.
+# The areas of agriculture are defined by the MapBiomas data using the following codes:
+# Agriculture 18
+# Temporary Crop 19
+# Soybean 39
+# Sugar cane 20
+# Rice 40
+# Cotton (beta) 62
+# Other Temporary Crops 41
+# Perennial Crop 36
+# Coffee 46
+# Citrus 47
+# Palm Oil 35
+# Other Perennial Crops 48
 
-# Now we will create a soybean mask, that is a binary map where the value 1 represents the presence
-# of soybean crops and the value 0 represents the absence of soybean crops.
+# Read the municipalities
+muni <- sf::st_read("data/municipalities.gpkg")
+muni["soil_class"] <- NA_character_
+muni["soil_prop"] <- NA_real_
+muni["agri_area_ha"] <- NA_real_
+print(muni)
 
+# Read the MapBiomas data
+mapbiomas <- terra::rast("data/mapbiomas2023.tif")
+print(mapbiomas)
+agriculture_classes <- c(18, 19, 39, 20, 40, 62, 41, 36, 46, 47, 35, 48)
 
+# Loop over municipalities
+for (i in 1:2) {
+  # Print municipality name
+  name_muni <- muni[i, "name_muni"][[1]]
+  abbrev_state <- muni[i, "abbrev_state"][[1]]
+  cat(paste0("Processing municipality: ", name_muni, " - ", abbrev_state, "\n"))
+  # Get the geometry of the municipality
+  muni_geom <- muni[i, "geom"]
 
+  # Clip the pedology data to the municipality
+  wkt <- sf::st_as_text(sf::st_geometry(muni_geom[1, ]))
+  pedology <- sf::st_read("data/pedology.gpkg", wkt_filter = wkt, quiet = TRUE)
+  pedology <- sf::st_intersection(pedology, muni_geom)
 
+  # Crop the MapBiomas data (SpatRaster) to the pedology
+  mapbiomas_clip <- terra::crop(mapbiomas, pedology)
 
+  # Mask the MapBiomas data to the pedology
+  mapbiomas_clip <- terra::mask(mapbiomas_clip, pedology)
 
+  # Create a mask for agriculture classes: if the value is in the agriculture classes, set it
+  # to 1, otherwise set it to 0
+  mapbiomas_clip[] <- ifelse(mapbiomas_clip[] %in% agriculture_classes, 1, NA_real_)
+  # If is all NA, skip the municipality
+  if (all(is.na(mapbiomas_clip[]))) {
+    muni[i, "soil_class"] <- NA_character_
+  } else {
+    # rasterize the pedology data, taking the mapbiomas_clip as a template
+    pedology_raster <- terra::rasterize(pedology, mapbiomas_clip, field = "legenda")
+    pedology_raster <- terra::mask(pedology_raster, mapbiomas_clip)
+    pedology_table <- table(pedology_raster[])
+    pedology_levels <- levels(pedology_raster)[[1]]
+    pedology_levels_idx <- pedology_levels$ID == names(which.max(pedology_table))
+    muni[i, "soil_class"] <- pedology_levels[pedology_levels_idx, "legenda"]
+    muni[i, "soil_prop"] <- round(max(pedology_table) / sum(pedology_table) * 100)
+    muni[i, "agri_area_ha"] <- round(
+      sum(terra::cellSize(mapbiomas_clip, unit = "ha")[] * mapbiomas_clip[], na.rm = TRUE)
+    )
+    # Print the dominant soil class
+    soil_class <- muni[i, "soil_class"][[1]]
+    soil_prop <- muni[i, "soil_prop"][[1]]
+    cat(paste0("Dominant soil class: ", soil_class, " - ", soil_prop, "%\n"))
+  }
+}
 
-
-
-
-
-
-
-
-# Load vector of the area of interest
-target <- geobr::read_state(code_state = "AC")
-
-# Compute the bounding box of the area of interest
-bbox <- sf::st_bbox(target)
-bbox <- bbox[c("xmin", "ymax", "xmax", "ymin")]
-
-# Configure WebDAV access
-# - max_retry: This sets the maximum number of retries if the connection fails.
-# - retry_delay: This sets the delay between retries in seconds.
-# - list_dir: This indicates that directory listing is not required.
-# - url: This is the actual URL of the resource to be accessed.
-max_retry <- 3
-retry_delay <- 1
-list_dir <- "no"
-url <- "https://files.isric.org/soilgrids/latest/data/"
-webdav_call <- paste0(
-  "/vsicurl?max_retry=", max_retry,
-  "&retry_delay=", retry_delay,
-  "&list_dir=", list_dir,
-  "&url=", url
-)
-
-# Download WRB maps of soil classification
-map_name <- "wrb/Acrisols.vrt"
-output_file <- "data/acrisols.tif"
-gdalUtilities::gdal_translate(
-  src_dataset = paste0(webdav_call, map_name),
-  dst_dataset = output_file,
-  projwin = bbox,
-  projwin_srs = "EPSG:4326"
-)
-
-# Read file and plot map
-acrisols <- raster::raster(output_file)
-png("res/acrisols.png")
-image(acrisols, main = "Acrisols")
-plot(target, add = TRUE, col = "transparent", lwd = 2)
-dev.off()
-
-# Create a binary map using gdal_calc.py
-# The input file is the output file from the previous step.
-input_file <- output_file
-prob <- 40
-calc <- paste0("where(A>", prob, ", 1, 0)")
-output_file <- paste0("data/acrisols_bin", prob, ".tif")
-cmd <- paste0(
-  "gdal_calc.py -A ",input_file, " --outfile=", output_file, " --calc=\"", calc, "\""
-)
-system(cmd)
-
-# Compute minimum legible area
-mla <- ((0.6 * 250000) / 100000)^2
-
-# Compute threshold for sieve filter
-threshold <- round(((sqrt(mla) * 1000) / 250)^2)
-
-# Filter binary map
-# The input file is the output file from the previous step.
-# -st: the threshold to remove isolated pixels
-# -8: the 8-connectedness of the sieve filter
-input_file <- output_file
-threshold <- ceiling(((sqrt(2.5) * 1000) / 250)^2)
-connectedness <- 8
-output_file <- paste0(
-  gsub(".tif", "", input_file), "_sieve", threshold, ".tif"
-)
-cmd <- paste0(
-  "gdal_sieve.py ", input_file, " -st ", threshold, " -", connectedness, " ",
-  output_file
-)
-system(cmd)
-
-# Read file and plot map
-acrisols <- raster::raster(output_file)
-png("res/acrisols_bin40_sieve41.png")
-image(acrisols, main = "Acrisols", col = c("white", "orange"))
-plot(target, add = TRUE, col = "transparent", lwd = 2)
-dev.off()
-
-# Transform the raster data to polygons
-# The input file is the output file from the previous step.
-input_file <- output_file
-output_file <- gsub(".tif", ".shp", input_file)
-cmd <- paste0("gdal_polygonize.py ", input_file, " ", output_file)
-system(cmd)
+# Save the results
+muni
 
 
 
 
 
 
-
-
-# To deal with an increasing number of inputs and computation demands, SoilGrids has since 2019 been computed on an equal-area projection. After a thorough comparison, the Homolosine projection was identified as the most efficient in an open source software framework (de Sousa et al. 2019). This projection is fully supported by the PROJ and GDAL libraries; therefore, it can be used with any GIS software. The Homolosine projection is now included in the PROJ database with the code ESRI:54052. The actual Spatial Reference System (SRS) of the SoilGrids maps is composed by the Homolosine projection applied to the WGS84 datum. The European Petroleum Survey Group (EPSG) never issued a code for this projection. However, some programmes like MapServer require any SRS to be associated with such a code. For that reason a pseudo EPSG code was created to refer to the SoilGrids SRS: EPSG:152160. The PROJ string for the Homolosine projection is:
-homolosine <- "+proj=igh +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs"
-
-# Next we transform the CRS of the area of interest to Homolosine projection and get the bounding box, the region of interest specified by georeference coordinates. 
-bbox <- sf::st_bbox(sf::st_transform(target, homolosine))[c(1, 4, 3, 2)]
-
-# Download  a geotiff in Homolosine projection. The following GDAL command will create a local geotiff in the Homolosine projection. We will use the gdalUtilities::gdal_translate(), but this could be done using GDAL command line tools as well.
-# In this example, we will work with the entire Brazilian territory and download data for the Acrisols soil class. The following command will download the VRT for the Acrisols class in the Homolosine projection. The VRT file is a lightweight XML file that contains metadata and pointers to the actual data files. The VRT file can be used as input for other GDAL commands. The gdal_translate() function will download the VRT file and save it as a local file named acrisols.vrt. The function will also clip the data to the bounding box of the area of interest.
-# More information about the gdal_translate() function can be found at https://gdal.org/programs/gdal_translate.html
-gdalUtilities::gdal_translate(
-  src_dataset = paste0(webdav_call, "wrb/Acrisols.vrt"),
-  dst_dataset = "data/acrisols.tif",
-  # tr = c(250, 250), # target resolution <xres> <yres>
-  projwin = bbox, # -projwin <ulx> <uly> <lrx> <lry>
-  projwin_srs = "EPSG:4326"
-  # projwin_srs = homolosine # -projwin_srs <srs_def>
-)
-
-# The second option is to download a geotiff in a different projection. In this case, we will download the VRT for the Acrisols class in the Homolosine projection and then reproject it to the WGS84 projection. The following command will download the VRT for the Acrisols class in the Homolosine projection. The VRT file is a lightweight XML file that contains metadata and pointers to the actual data files. The VRT file can be used as input for other GDAL commands. The gdal_translate() function will download the VRT file and save it as a local file named acrisols.vrt. The function will also clip the data to the bounding box of the area of interest. The following commands describe a workflow to obtain a VRT or a GeoTiff for an area of interest in a projection of your choice. In this example we will use EPSG=4326. To local VRT in homolosine (directly from the webdav connection). The first step is to obtain a VRT for the area of interest in the Homolosine projection. We suggest to use VRT for the intermediate steps to save space and computation times.
-
-gdalUtilities::gdal_translate(
-  src_dataset = paste0(soilgrids_url, "wrb/Acrisols.vrt"),
-  dst_dataset = "data/acrisols.vrt",
-  of = "VRT",
-  # tr = c(250, 250),
-  projwin = bbox,
-  projwin_srs = homolosine
-)
-
-# To a VRT in, for example, LatLong
-# The following command will generate a VRT in the projection of your choice:
-gdalUtilities::gdalwarp("data/acrisols.vrt",
-    "data/acrisols_wgs84.vrt", 
-    s_srs = homolosine, 
-    t_srs = "EPSG:4326", 
-    of = "VRT",
-    overwrite = TRUE)
-
-# To a final Geotiff
-# The following command will generate a Geotiff in the projection of your choice for the area of interest defined above
-gdalUtilities::gdal_translate("data/acrisols_wgs84.vrt",
-    "data/acrisols_wgs84.tif", 
-    co = c("TILED=YES","COMPRESS=DEFLATE","PREDICTOR=2","BIGTIFF=YES"))
+length(terra::cellSize(mapbiomas_clip)[])
+length(na.exclude(mapbiomas_clip[]))
