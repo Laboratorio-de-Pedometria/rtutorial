@@ -5,3 +5,5 @@ data/*.tif
 data/*.prj
 res/*.png
 data/*.shx
+data/*.gpkg
+data/*.json
