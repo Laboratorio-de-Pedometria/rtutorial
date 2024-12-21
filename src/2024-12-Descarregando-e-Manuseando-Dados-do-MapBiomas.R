@@ -2,6 +2,20 @@
 # Alessandro Samuel-Rosa & Taciara Zborowski Horst
 # 2024-12-20
 
+# Processing municipality: Santana - AP
+# muni_geom size: 0 Mb
+# pedology_muni size: 2.9 Mb
+# pedology_muni size: 0.2 Mb
+# mapbiomas_muni size: 0 Mb
+# Error : [] nrow dataframe does not match nrow geometry
+# In addition: Warning messages:
+# 1: [SpatVector from sf] not all geometries were transferred, use svc for a geometry collection 
+# 2: [SpatVector from sf] not all geometries were transferred, use svc for a geometry collection 
+# 3: [SpatVector from sf] not all geometries were transferred, use svc for a geometry collection 
+# Error: [as,sf] coercion failed. You can try coercing via a Spatial* (sp) class
+# > Sys.time() - t0
+# Time difference of 58.59917 mins
+
 # Summary
 # In this exercise, we will identify the dominant soil class in areas with agriculture for each
 # Brazilian municipality.
