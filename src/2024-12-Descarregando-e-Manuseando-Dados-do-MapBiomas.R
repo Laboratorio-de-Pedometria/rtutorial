@@ -22,9 +22,6 @@ if (!require(geobr)) {
   install.packages("geobr")
   library(geobr)
 }
-# if (!require(gdalUtilities)) {
-#   install.packages("gdalUtilities")
-# }
 if (!require(terra)) {
   install.packages("terra")
   library(terra)
@@ -150,6 +147,7 @@ print(muni)
 
 # Loop over municipalities
 # There are 5,570 municipalities in Brazil. This loop may take a long time to complete.
+t0 <- Sys.time()
 for (i in 1:nrow(muni)) {
   # Print municipality name
   name_muni <- muni[i, "name_muni"][[1]]
@@ -218,14 +216,8 @@ for (i in 1:nrow(muni)) {
     cat(paste0("Dominant soil class: ", soil_class, " - ", soil_prop, "%\n"))
   }
 }
+Sys.time() - t0
 
 # Save the results
-muni
-
-
-
-
-
-
-length(terra::cellSize(mapbiomas_clip)[])
-length(na.exclude(mapbiomas_clip[]))
+output_file <- "res/municipalities_soil_agri.gpkg"
+sf::st_write(muni, output_file, driver = "GPKG")
