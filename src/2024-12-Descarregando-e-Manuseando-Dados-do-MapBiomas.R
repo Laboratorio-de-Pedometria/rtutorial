@@ -10,8 +10,10 @@
 # If the directories already exist, the function will return a warning.
 # - data: to store downloaded data
 # - res: to store results
+# - tmp: to store temporary files
 dir.create("data", showWarnings = TRUE)
 dir.create("res", showWarnings = TRUE)
+dir.create("tmp", showWarnings = TRUE)
 
 # Load necessary libraries, installing them if they are not available
 if (!require(sf)) {
@@ -30,6 +32,13 @@ if (!require(terra)) {
 # We will be downloading large files, so we need to increase the timeout for the download
 # The default timeout is 60 seconds. We will increase it to 3600 seconds (60 minutes).
 options(timeout = 3600)
+
+# Helper function to print object name and size
+print_object_size <- function(object) {
+  object_name <- deparse(substitute(object))
+  size <- format(object.size(object), units = "MB")
+  cat(paste0(object_name, " size: ", size, "\n"))
+}
 
 # Brazilian municipalities #########################################################################
 # We start by downloading the vector of the Brazilian municipalities. The data is available at a
@@ -115,6 +124,22 @@ if (!file.exists(output_file)) {
 # We will identify, for each municipality, the dominant soil class in areas with agriculture.
 # By agriculture, we mean the classes related to agriculture in the MapBiomas data.
 
+# Read the municipalities
+muni <- sf::st_read("data/municipalities.gpkg")
+print_object_size(muni)
+# Create columns to store the results
+# - soil_class_first: the dominant soil class in the municipality
+# - soil_prop_first: the proportion of the dominant soil class in the municipality
+# - soil_class_second: the second dominant soil class in the municipality
+# - soil_prop_second: the proportion of the second dominant soil class in the municipality
+# - agri_area_ha: the area of agriculture in hectares
+muni["soil_class_first"] <- NA_character_
+muni["soil_prop_first"] <- NA_real_
+muni["soil_class_second"] <- NA_character_
+muni["soil_prop_second"] <- NA_real_
+muni["agri_area_ha"] <- NA_real_
+print(muni)
+
 # Read the MapBiomas data
 # When we read a raster with the terra package, it does not load the cell (pixel) values into
 # memory (RAM). It only reads the parameters that describe the geometry of the raster, such as
@@ -123,7 +148,7 @@ if (!file.exists(output_file)) {
 mapbiomas <- terra::rast("data/mapbiomas2023.tif")
 print(mapbiomas)
 agri_classes <- c(
-  18, # Agriculture 
+  18, # Agriculture
   19, # Temporary Crop
   39, # Soybean
   20, # Sugar cane
@@ -134,16 +159,9 @@ agri_classes <- c(
   46, # Coffee
   47, # Citrus
   35, # Palm Oil
-  48) # Other Perennial Crops
-
-# Read the municipalities
-muni <- sf::st_read("data/municipalities.gpkg")
-muni["soil_class_first"] <- NA_character_
-muni["soil_prop_first"] <- NA_real_
-muni["soil_class_second"] <- NA_character_
-muni["soil_prop_second"] <- NA_real_
-muni["agri_area_ha"] <- NA_real_
-print(muni)
+  48  # Other Perennial Crops
+)
+reclass_matrix <- matrix(cbind(agri_classes, rep(1, length(agri_classes))), ncol = 2)
 
 # Loop over municipalities
 # There are 5,570 municipalities in Brazil. This loop may take a long time to complete.
@@ -156,30 +174,45 @@ for (i in 1:nrow(muni)) {
   
   # Get the geometry of the municipality
   muni_geom <- muni[i, "geom"]
+  print_object_size(muni_geom)
 
   # Read the pedology data to the bounding box of the municipality
   wkt <- sf::st_as_text(sf::st_geometry(muni_geom))
   pedology_muni <- sf::st_read("data/pedology.gpkg", wkt_filter = wkt, quiet = TRUE)
+  print_object_size(pedology_muni)
+  # Set the aggregation function to "constant" to avoid aggregation of the data
+  # A constant attribute means that the attribute values do not change within the spatial extent
+  # of each geometry, in this case, the soil class.
+  sf::st_agr(pedology_muni) <- "constant"  
+  
   # Clip the pedology data to the boundaries of the selected municipality
   pedology_muni <- sf::st_intersection(pedology_muni, muni_geom)
+  print_object_size(pedology_muni)
   # x11()
-  # plot(pedology_muni["id"])
+  # plot(pedology_muni["id"], main = name_muni)
 
   # Crop the MapBiomas raster data to the boundaries of the pedology data
+  # This operation will require up to 12 GB of memory to process the municipality of Altamira (PA).
   mapbiomas_muni <- terra::crop(mapbiomas, pedology_muni)
-  # plot(mapbiomas_muni)
+  print_object_size(mapbiomas_muni)
+  # plot(mapbiomas_muni, main = name_muni)
   # plot(pedology_muni["legenda"], add = TRUE)
 
   # Clip (mask) the MapBiomas data to the boundary of the pedology data
+  # This operation will require up to 16 GB of memory to process the municipality of Altamira (PA).
   mapbiomas_muni <- terra::mask(mapbiomas_muni, pedology_muni)
-  # plot(mapbiomas_muni)
+  # plot(mapbiomas_muni, main = name_muni)
   # plot(pedology_muni["legenda"], add = TRUE)
+  # print_object_size(mapbiomas_muni)
 
-  # Create a mask for agriculture classes (this operation takes some time to complete)
-  # - Rule: If the value is in the agriculture classes, set it to 1, otherwise set it to 0.
-  mapbiomas_muni[] <- ifelse(mapbiomas_muni[] %in% agri_classes, 1, NA_real_)
-  # If is all values are NA, skip the municipality
-  if (all(is.na(mapbiomas_muni[]))) {
+  # Create a mask for agriculture classes using terra::classify
+  # This operation will require up to 14 GB of memory to process the municipality of Altamira (PA).
+  mapbiomas_muni <- terra::classify(mapbiomas_muni, reclass_matrix, others = NA)
+  print_object_size(mapbiomas_muni)
+  # If all values are NA, skip the municipality
+  # This operation will require up to 14 GB of memory to process the municipality of Altamira (PA).
+  muni_all_na <- terra::global(mapbiomas_muni, "isNA") == terra::ncell(mapbiomas_muni)
+  if (muni_all_na) {
     muni[i, "soil_class_first"] <- NA_character_
     muni[i, "soil_prop_first"] <- NA_real_
     muni[i, "soil_class_second"] <- NA_character_
@@ -189,12 +222,17 @@ for (i in 1:nrow(muni)) {
     # Rasterize the pedology data, taking the mapbiomas_muni as a template. This will ensure that
     # the pedology data has the same extent, resolution, and alignment as the mapbiomas data.
     # We will use the "legenda" field to rasterize the data.
+    # This operation will require up to 10 GB of memory to process the municipality of Altamira (PA)
     pedology_muni <- terra::rasterize(pedology_muni, mapbiomas_muni, field = "legenda")
+    print_object_size(pedology_muni)
     # Mask the pedology raster to the mapbiomas data. This will ensure that the pedology data
     # is available only for the agriculture areas.
+    # This operation will require up to 16 GB of memory to process the municipality of Altamira (PA)
     pedology_muni <- terra::mask(pedology_muni, mapbiomas_muni)
+    print_object_size(pedology_muni)
     # plot(pedology_muni)
     # Get the frequency of the pedology data and sort by 'count'  
+    # This operation will require up to 14 GB of memory to process the municipality of Altamira (PA).
     pedology_table <- terra::freq(pedology_muni)
     pedology_table <- pedology_table[order(-pedology_table[, "count"]), ]
     # Record the two dominant soil classes in the municipality data
@@ -207,6 +245,7 @@ for (i in 1:nrow(muni)) {
     muni[i, "soil_prop_second"] <- round(
       pedology_table[2, "count"] / sum(pedology_table[, "count"]) * 100)
     # Record the area of agriculture in hectares
+    # This operation will require up to 21 GB of memory to process the municipality of Altamira (PA).
     muni[i, "agri_area_ha"] <- round(
       sum(terra::cellSize(mapbiomas_muni, unit = "ha")[] * mapbiomas_muni[], na.rm = TRUE)
     )
@@ -219,5 +258,5 @@ for (i in 1:nrow(muni)) {
 Sys.time() - t0
 
 # Save the results
-output_file <- "res/municipalities_soil_agri.gpkg"
+output_file <- "~/ownCloud/geoBioAS/res/2024-12-21/municipalities_soil_agri.gpkg"
 sf::st_write(muni, output_file, driver = "GPKG")
